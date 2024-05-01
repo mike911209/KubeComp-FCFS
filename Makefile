@@ -10,7 +10,7 @@ loadImage:
 	kind load docker-image my-scheduler:local
 
 deploy:
-	helm install scheduler-plugins charts/ 
+	helm install scheduler-plugins charts/ --create-namespace --namespace scheduler-plugins
 
 remove:
 	helm uninstall scheduler-plugins

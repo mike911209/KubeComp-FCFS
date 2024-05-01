@@ -3,8 +3,7 @@ kind: Pod
 metadata:
   name: nginx
   labels:
-    podGroup: "A"
-    minAvailable: "1"
+    name: nginx
 spec:
   schedulerName: my-scheduler
   containers:
@@ -14,7 +13,7 @@ spec:
     - containerPort: 80
     resources:
       requests:
-        memory: "100Mi"
+        example.com/foo: 2
       limits:
-        memory: "100Mi"
+        example.com/foo: 2
     

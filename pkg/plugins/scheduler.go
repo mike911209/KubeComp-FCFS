@@ -1,13 +1,15 @@
 package plugins
 
 import (
+	"container/list"
 	"context"
-	"log"
+	"encoding/json"
 	"fmt"
+	"log"
+
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
-	"encoding/json"
 )
 
 type CustomSchedulerArgs struct {
@@ -15,20 +17,30 @@ type CustomSchedulerArgs struct {
 }
 
 type CustomScheduler struct {
-	handle 	framework.Handle
-	scoreMode string
+	handle framework.Handle
 }
 
 var _ framework.PreFilterPlugin = &CustomScheduler{}
-var _ framework.ScorePlugin = &CustomScheduler{}
+var fcfsQueue = list.New()
+
+func FindElement(name string, fcfsQueue *list.List) int {
+	index := 0
+	for e := fcfsQueue.Front(); e != nil; e = e.Next() {
+		if e.Value == name {
+			return index
+		}
+		index++
+	}
+	return -1
+}
 
 // Name is the name of the plugin used in Registry and configurations.
 const (
-	Name				string = "CustomScheduler"
-	groupNameLabel 		string = "podGroup"
-	minAvailableLabel 	string = "minAvailable"
-	leastMode			string = "Least"
-	mostMode			string = "Most"			
+	Name              string = "CustomScheduler"
+	groupNameLabel    string = "podGroup"
+	minAvailableLabel string = "minAvailable"
+	leastMode         string = "Least"
+	mostMode          string = "Most"
 )
 
 func (cs *CustomScheduler) Name() string {
@@ -38,21 +50,15 @@ func (cs *CustomScheduler) Name() string {
 // New initializes and returns a new CustomScheduler plugin.
 func New(obj runtime.Object, h framework.Handle) (framework.Plugin, error) {
 	cs := CustomScheduler{}
-	mode := leastMode
 	if obj != nil {
 		args := obj.(*runtime.Unknown)
 		var csArgs CustomSchedulerArgs
 		if err := json.Unmarshal(args.Raw, &csArgs); err != nil {
 			fmt.Printf("Error unmarshal: %v\n", err)
 		}
-		mode = csArgs.Mode
-		if mode != leastMode && mode != mostMode {
-			return nil, fmt.Errorf("invalid mode, got %s", mode)
-		}
 	}
 	cs.handle = h
-	cs.scoreMode = mode
-	log.Printf("Custom scheduler runs with the mode: %s.", mode)
+	log.Printf("Custom scheduler was created!")
 
 	return &cs, nil
 }
@@ -60,42 +66,59 @@ func New(obj runtime.Object, h framework.Handle) (framework.Plugin, error) {
 // filter the pod if the pod in group is less than minAvailable
 func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
 	log.Printf("Pod %s is in Prefilter phase.", pod.Name)
-	newStatus := framework.NewStatus(framework.Success, "")
 
-	// TODO
-	// 1. extract the label of the pod
-	// 2. retrieve the pod with the same group label
-	// 3. justify if the pod can be scheduled
+	// check if there exist waiting pod
+	log.Printf("fcfsQueue.size: %d", fcfsQueue.Len())
+	if fcfsQueue.Len() > 0 && pod.Name != fcfsQueue.Front().Value {
+		// if the pod is not in queue
+		if FindElement(pod.Name, fcfsQueue) == -1 {
+			fcfsQueue.PushBack(pod.Name)
+		}
+		log.Printf("Pod %s is postponed in waiting queue.", pod.Name)
+		return nil, framework.NewStatus(framework.Unschedulable, "push and wait in the FCFS queue")
+	}
 
-	return nil, newStatus
+	log.Printf("Checking whether pod %s is qualified", pod.Name)
+
+	// obtain node info
+	nodeList, err := cs.handle.SnapshotSharedLister().NodeInfos().List()
+	if err != nil {
+		log.Printf("Failed to get node status")
+		return nil, framework.NewStatus(framework.Unschedulable, "failed to get node status")
+	}
+
+	log.Printf("calculating total request number of resourcs")
+	var totalRequestNum int64 = 0
+	for _, container := range pod.Spec.Containers {
+		// obtain the request number of resources
+		temp := container.Resources.Requests["example.com/foo"]
+		requestNum, _ := temp.AsInt64()
+		totalRequestNum += requestNum
+	}
+	log.Printf("Pod %s require %d resources", pod.Name, totalRequestNum)
+
+	log.Printf("Checking if there exist a node satisfied the request amount")
+	for _, node := range nodeList {
+		resourceNum := node.Allocatable.ScalarResources["example.com/foo"]
+		log.Printf("Resource num: %d", resourceNum)
+		if totalRequestNum <= resourceNum {
+			log.Printf("Find exist node qualified, preFilter return Success")
+			if fcfsQueue.Len() > 0 && pod.Name == fcfsQueue.Front().Value {
+				fcfsQueue.Remove(fcfsQueue.Front())
+			}
+			return nil, framework.NewStatus(framework.Success, "Found a node to schedule")
+		}
+	}
+
+	log.Printf("No existing node is qualified, push into waiting queue")
+	// if the pod is not in queue -> push it!
+	if fcfsQueue.Len() == 0 {
+		fcfsQueue.PushBack(pod.Name)
+	}
+	return nil, framework.NewStatus(framework.Unschedulable, "No enough resources")
 }
 
 // PreFilterExtensions returns a PreFilterExtensions interface if the plugin implements one.
 func (cs *CustomScheduler) PreFilterExtensions() framework.PreFilterExtensions {
 	return nil
-}
-
-
-// Score invoked at the score extension point.
-func (cs *CustomScheduler) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
-	log.Printf("Pod %s is in Score phase. Calculate the score of Node %s.", pod.Name, nodeName)
-
-	// TODO
-	// 1. retrieve the node allocatable memory
-	// 2. return the score based on the scheduler mode
-	
-	return 0, nil
-}
-
-// ensure the scores are within the valid range
-func (cs *CustomScheduler) NormalizeScore(ctx context.Context, state *framework.CycleState, pod *v1.Pod, scores framework.NodeScoreList) *framework.Status {
-	// TODO
-	// find the range of the current score and map to the valid range
-
-	return nil
-}
-
-// ScoreExtensions of the Score plugin.
-func (cs *CustomScheduler) ScoreExtensions() framework.ScoreExtensions {
-	return cs
 }
