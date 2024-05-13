@@ -13,7 +13,7 @@ spec:
     - containerPort: 80
     resources:
       requests:
-        example.com/foo: 2
+        myway5.com/cola: 2
       limits:
-        example.com/foo: 2
+        myway5.com/cola: 2
     

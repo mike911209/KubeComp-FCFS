@@ -91,7 +91,7 @@ func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.Cycle
 	var totalRequestNum int64 = 0
 	for _, container := range pod.Spec.Containers {
 		// obtain the request number of resources
-		temp := container.Resources.Requests["example.com/foo"]
+		temp := container.Resources.Requests["myway5.com/cola"]
 		requestNum, _ := temp.AsInt64()
 		totalRequestNum += requestNum
 	}
@@ -99,7 +99,7 @@ func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.Cycle
 
 	log.Printf("Checking if there exist a node satisfied the request amount")
 	for _, node := range nodeList {
-		resourceNum := node.Allocatable.ScalarResources["example.com/foo"]
+		resourceNum := node.Allocatable.ScalarResources["myway5.com/cola"]
 		log.Printf("Resource num: %d", resourceNum)
 		if totalRequestNum <= resourceNum {
 			log.Printf("Find exist node qualified, preFilter return Success")
