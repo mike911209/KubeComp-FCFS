@@ -89,24 +89,19 @@ func New(obj runtime.Object, h framework.Handle) (framework.Plugin, error) {
 
 // This function extracts used GPU slices in current node
 // will return CPU and Mem resource left in current node
-func (cs *CustomScheduler) extractUsedGPU(nodeName string) (int64, int64) {
+func (cs *CustomScheduler) extractUsedGPU(node *framework.NodeInfo) (int64, int64) {
 	// list all the pods scheduled on the node
-	pods, err := cs.handle.ClientSet().CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
-		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
-	})
-	if err != nil {
-		log.Fatal("Error listing pods on node %s: %v\n", nodeName, err)
-	}
+	pods := node.Pods
 
 	// calculate CPU and Mem resource left in current node
 	CPULeft, MemLeft := CPUTotal, MemTotal
 	removeString := "nvidia.com/mig-"
-	for _, pod := range pods.Items {
+	for _, pod := range pods {
 		// skip the terminated pod
-		if pod.Status.Phase == v1.PodSucceeded || pod.Status.Phase == v1.PodFailed {
+		if pod.Pod.Status.Phase == v1.PodSucceeded || pod.Pod.Status.Phase == v1.PodFailed {
 			continue
 		}
-		for _, c := range pod.Spec.Containers {
+		for _, c := range pod.Pod.Spec.Containers {
 			// loop through all resource request til the request is "nvidia.com/..."
 			for sliceName, sliceCnts := range c.Resources.Requests {
 				if strings.HasPrefix(string(sliceName), gpuResources) {
@@ -125,7 +120,7 @@ func (cs CustomScheduler) findBestNode(nodeList []*framework.NodeInfo, CPUReques
 	var bestCPULeft, bestMemLeft int64 = CPUTotal, MemTotal
 	bestNode := ""
 	for _, node := range nodeList {
-		CPULeft, MemLeft := cs.extractUsedGPU(node.Node().Name)
+		CPULeft, MemLeft := cs.extractUsedGPU(node)
 		if (CPULeft >= CPURequest && MemLeft >= MemRequest) && (CPULeft <= bestCPULeft && MemLeft <= bestMemLeft) {
 			bestCPULeft, bestMemLeft = CPULeft, MemLeft
 			bestNode = node.Node().Name
@@ -158,13 +153,6 @@ func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.Cycle
 
 	log.Printf("Checking whether pod %s is qualified", pod.Name)
 
-	// obtain node info
-	nodeList, err := cs.handle.SnapshotSharedLister().NodeInfos().List()
-	if err != nil {
-		log.Printf("Failed to get node status")
-		return nil, framework.NewStatus(framework.Unschedulable, "failed to get node status")
-	}
-
 	// calculating request # resourcs
 	log.Printf("calculating total CPU and Mem request")
 	var CPURequest, MemRequest int64 = 0, 0
@@ -183,6 +171,13 @@ func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.Cycle
 	}
 	log.Printf("Pod %s require %d CPU and %d Mem", pod.Name, CPURequest, MemRequest)
 
+	// obtain node info
+	nodeList, err := cs.handle.SnapshotSharedLister().NodeInfos().List()
+	if err != nil {
+		log.Printf("Failed to get node status")
+		return nil, framework.NewStatus(framework.Unschedulable, "failed to get node status")
+	}
+
 	// check if some nodes satisfy the request
 	// if found -> label the best node as "target" then return
 	// if not   -> push into FCFSQueue
@@ -198,6 +193,7 @@ func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.Cycle
 	}
 
 	// obtain node label list
+	// TODO: use nodeList to obtain bestNode_ rather than sending request once more
 	bestNode_, err := cs.handle.ClientSet().CoreV1().Nodes().Get(context.TODO(), bestNode, metav1.GetOptions{})
 	if err != nil {
 		return nil, framework.NewStatus(framework.Error, "error geting node Labels")
