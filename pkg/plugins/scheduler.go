@@ -28,20 +28,20 @@ var _ framework.PreFilterPlugin = &CustomScheduler{}
 var fcfsQueue = list.New()
 
 var CPUDevice = map[string]int64{
-	"1g.5gb":  1,
-	"1g.10gb": 1,
-	"2g.10gb": 2,
-	"3g.20gb": 3,
-	"4g.20gb": 4,
-	"7g.40gb": 7,
+	"nvidia.com/mig-1g.5gb":  1,
+	"nvidia.com/mig-1g.10gb": 1,
+	"nvidia.com/mig-2g.10gb": 2,
+	"nvidia.com/mig-3g.20gb": 3,
+	"nvidia.com/mig-4g.20gb": 4,
+	"nvidia.com/mig-7g.40gb": 7,
 }
 var MemDevice = map[string]int64{
-	"1g.5gb":  5,
-	"1g.10gb": 10,
-	"2g.10gb": 20,
-	"3g.20gb": 20,
-	"4g.20gb": 20,
-	"7g.40gb": 40,
+	"nvidia.com/mig-1g.5gb":  5,
+	"nvidia.com/mig-1g.10gb": 10,
+	"nvidia.com/mig-2g.10gb": 20,
+	"nvidia.com/mig-3g.20gb": 20,
+	"nvidia.com/mig-4g.20gb": 20,
+	"nvidia.com/mig-7g.40gb": 40,
 }
 
 func FindElement(name string, fcfsQueue *list.List) int {
@@ -89,13 +89,22 @@ func New(obj runtime.Object, h framework.Handle) (framework.Plugin, error) {
 
 // This function extracts used GPU slices in current node
 // will return CPU and Mem resource left in current node
-func (cs *CustomScheduler) extractUsedGPU(node *framework.NodeInfo) (int64, int64) {
+// and also return the number of each mig slice left un current node
+func (cs *CustomScheduler) extractUsedGPU(node *framework.NodeInfo) (int64, int64, map[string]int64) {
+	migSlicecnts := make(map[string]int64)
+
 	// list all the pods scheduled on the node
 	pods := node.Pods
 
+	// obtain all the gpu resources on current node
+	for resourceName, quantity := range node.Node().Status.Allocatable {
+		if strings.HasPrefix(string(resourceName), gpuResources) {
+			migSlicecnts[resourceName.String()] = quantity.Value()
+		}
+	}
+
 	// calculate CPU and Mem resource left in current node
 	CPULeft, MemLeft := CPUTotal, MemTotal
-	removeString := "nvidia.com/mig-"
 	for _, pod := range pods {
 		// skip the terminated pod
 		if pod.Pod.Status.Phase == v1.PodSucceeded || pod.Pod.Status.Phase == v1.PodFailed {
@@ -106,22 +115,31 @@ func (cs *CustomScheduler) extractUsedGPU(node *framework.NodeInfo) (int64, int6
 			for sliceName, sliceCnts := range c.Resources.Requests {
 				if strings.HasPrefix(string(sliceName), gpuResources) {
 					num, _ := sliceCnts.AsInt64()
-					CPULeft -= num * CPUDevice[string(sliceName)[len(removeString):]]
-					MemLeft -= num * MemDevice[string(sliceName)[len(removeString):]]
+					CPULeft -= num * CPUDevice[sliceName.String()]
+					MemLeft -= num * MemDevice[sliceName.String()]
+					migSlicecnts[sliceName.String()] -= num
 				}
 			}
 		}
 	}
-	return CPULeft, MemLeft
+	return CPULeft, MemLeft, migSlicecnts
 }
 
 // Find the node with least resource but sufficient enough for request
-func (cs CustomScheduler) findBestNode(nodeList []*framework.NodeInfo, CPURequest int64, MemRequest int64) (string, error) {
-	var bestCPULeft, bestMemLeft int64 = CPUTotal, MemTotal
+func (cs CustomScheduler) findBestNode(nodeList []*framework.NodeInfo, request string) (string, error, bool) {
+	// obtain the request type of resource
+	CPURequest, MemRequest := CPUDevice[request], MemDevice[request]
+
+	bestCPULeft, bestMemLeft := CPUTotal, MemTotal
+	toBeReconfig := true // true -> to be reconfig; false -> no need to reconfig
 	bestNode := ""
 	for _, node := range nodeList {
-		CPULeft, MemLeft := cs.extractUsedGPU(node)
+		CPULeft, MemLeft, migSlicecnts := cs.extractUsedGPU(node)
 		if (CPULeft >= CPURequest && MemLeft >= MemRequest) && (CPULeft <= bestCPULeft && MemLeft <= bestMemLeft) {
+			// if there exist available resource -> no need to reconfig
+			if migSlicecnts[request] > 0 {
+				toBeReconfig = false
+			}
 			bestCPULeft, bestMemLeft = CPULeft, MemLeft
 			bestNode = node.Node().Name
 		}
@@ -129,10 +147,10 @@ func (cs CustomScheduler) findBestNode(nodeList []*framework.NodeInfo, CPUReques
 
 	if bestNode == "" {
 		log.Printf("No node with sufficient resources")
-		return bestNode, fmt.Errorf("No node with sufficient resources")
+		return bestNode, fmt.Errorf("No node with sufficient resources"), toBeReconfig
 	}
 	log.Printf("%s is the chosen node with CPU %d, Mem %d left", bestNode, bestCPULeft, bestMemLeft)
-	return bestNode, nil
+	return bestNode, nil, toBeReconfig
 }
 
 // serving FCFS policy, filter out the node without sufficient resources
@@ -155,21 +173,28 @@ func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.Cycle
 
 	// calculating request # resourcs
 	log.Printf("calculating total CPU and Mem request")
-	var CPURequest, MemRequest int64 = 0, 0
-	removeString := "nvidia.com/mig-"
+	request := ""
+	// var CPURequest, MemRequest int64 = 0, 0
+
+	// TODO: current assume a pod request only one mig slice
 	for _, c := range pod.Spec.Containers {
-		// loop through all resource request til the request is "nvidia.com/..."
+		// loop through all resource request til find the request "nvidia.com/..."
 		for sliceName, sliceCnts := range c.Resources.Requests {
 			log.Printf("Resource request: %s", sliceName)
 			if strings.HasPrefix(string(sliceName), gpuResources) {
 				num, _ := sliceCnts.AsInt64()
-				log.Printf("Resource request: %s; num: %d", string(sliceName)[len(removeString):], num)
-				CPURequest += num * CPUDevice[string(sliceName)[len(removeString):]]
-				MemRequest += num * MemDevice[string(sliceName)[len(removeString):]]
+				log.Printf("Resource request: %s; num: %d", sliceName.String(), num)
+				// CPURequest += num * CPUDevice[sliceName.String()]
+				// MemRequest += num * MemDevice[sliceName.String()]
+				request = sliceName.String()
+				break
 			}
 		}
+		if request != "" {
+			break
+		}
 	}
-	log.Printf("Pod %s require %d CPU and %d Mem", pod.Name, CPURequest, MemRequest)
+	log.Printf("Pod %s require %s resource", pod.Name, request)
 
 	// obtain node info
 	nodeList, err := cs.handle.SnapshotSharedLister().NodeInfos().List()
@@ -181,7 +206,8 @@ func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.Cycle
 	// check if some nodes satisfy the request
 	// if found -> label the best node as "target" then return
 	// if not   -> push into FCFSQueue
-	bestNode, err := cs.findBestNode(nodeList, CPURequest, MemRequest)
+	// TODO
+	bestNode, err, toBeReconfig := cs.findBestNode(nodeList, request)
 	if err != nil {
 		// no node satisfy the request
 		log.Printf("No existing node is qualified, push into waiting queue")
@@ -192,21 +218,25 @@ func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.Cycle
 		return nil, framework.NewStatus(framework.Unschedulable, "No enough resources")
 	}
 
-	// obtain node label list
-	// TODO: use nodeList to obtain bestNode_ rather than sending request once more
-	bestNode_, err := cs.handle.ClientSet().CoreV1().Nodes().Get(context.TODO(), bestNode, metav1.GetOptions{})
-	if err != nil {
-		return nil, framework.NewStatus(framework.Error, "error geting node Labels")
-	}
+	// update node's label
+	if toBeReconfig {
+		var bestNode_ *v1.Node
 
-	log.Printf("Updating Node labels to targetPod and targetNamespace")
-	// update node labels as target
-	bestNode_.Labels[targetPodLabel] = pod.Name
-	bestNode_.Labels[targetNamespaceLabel] = pod.Namespace
-	_, err = cs.handle.ClientSet().CoreV1().Nodes().Update(context.TODO(), bestNode_, metav1.UpdateOptions{})
-	if err != nil {
-		log.Print(err)
-		return nil, framework.NewStatus(framework.Error, "error updating node labels")
+		log.Printf("Updating Node labels to targetPod and targetNamespace")
+		for _, node := range nodeList {
+			if node.Node().Name == bestNode {
+				bestNode_ = node.Node()
+			}
+		}
+
+		// update node labels as target
+		bestNode_.Labels[targetPodLabel] = pod.Name
+		bestNode_.Labels[targetNamespaceLabel] = pod.Namespace
+		_, err = cs.handle.ClientSet().CoreV1().Nodes().Update(context.TODO(), bestNode_, metav1.UpdateOptions{})
+		if err != nil {
+			log.Print(err)
+			return nil, framework.NewStatus(framework.Error, "error updating node labels")
+		}
 	}
 
 	log.Printf("Find existing node qualified, preFilter return Success")
