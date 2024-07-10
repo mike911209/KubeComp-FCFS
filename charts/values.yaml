@@ -1,7 +1,7 @@
 scheduler:
   name: my-scheduler 
   image: mike911209/my-scheduler:latest
-  imagePullPolicy: IfNotPresent
+  imagePullPolicy: Always
   replicaCount: 1
   leaderElect: false
 

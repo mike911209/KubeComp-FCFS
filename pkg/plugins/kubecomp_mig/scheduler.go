@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
@@ -24,7 +23,11 @@ type CustomScheduler struct {
 }
 
 var _ framework.PreFilterPlugin = &CustomScheduler{}
+
+// var _ framework.FilterPlugin = &CustomScheduler{}
 var _ framework.ScorePlugin = &CustomScheduler{}
+
+// var _ framework.PostFilterPlugin = &CustomScheduler{}
 
 var fcfsQueue = list.New()
 
@@ -81,7 +84,7 @@ func FindElement(name string, fcfsQueue *list.List) int {
 }
 
 // New initializes and returns a new CustomScheduler plugin.
-func New(obj runtime.Object, h framework.Handle) (framework.Plugin, error) {
+func New(_ context.Context, obj runtime.Object, h framework.Handle) (framework.Plugin, error) {
 	cs := CustomScheduler{}
 	if obj != nil {
 		args := obj.(*runtime.Unknown)
@@ -177,76 +180,14 @@ func (cs CustomScheduler) findBestNode(nodeList []*framework.NodeInfo, requestGP
 func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
 	log.Printf("Pod %s is in Prefilter phase.", pod.Name)
 
-	// check if there exist waiting pod
-	log.Printf("fcfsQueue.size: %d", fcfsQueue.Len())
-	if fcfsQueue.Len() > 0 && pod.Name != fcfsQueue.Front().Value {
-		// if the pod is not in queue
-		if FindElement(pod.Name, fcfsQueue) == -1 {
-			fcfsQueue.PushBack(pod.Name)
-		}
-		log.Printf("Pod %s is postponed in waiting queue.", pod.Name)
-		return nil, framework.NewStatus(framework.Unschedulable, "push and wait in the FCFS queue")
+	if pod.ObjectMeta.Labels["preprocess"] != "done" {
+		log.Printf("Pod %s's preprocess not done yet.", pod.Name)
+		return nil, framework.NewStatus(framework.Unschedulable, "preprocess not done yet")
 	}
 
-	// calculating request # resourcs
-	log.Printf("calculating total CPU and Mem request")
-	requestGPU := make(map[string]int64)
+	log.Printf("Pod %s's preprocess done, can be scheduled", pod.Name)
 
-	// obtain resource request num of the pod
-	for _, c := range pod.Spec.Containers {
-		for sliceName, sliceCnts := range c.Resources.Requests {
-			if strings.HasPrefix(string(sliceName), gpuResources) {
-				num, _ := sliceCnts.AsInt64()
-				log.Printf("Resource request: %s; num: %d", sliceName.String(), num)
-				requestGPU[sliceName.String()] += num
-			}
-		}
-	}
-
-	// obtain list of node info
-	nodeList, err := cs.handle.SnapshotSharedLister().NodeInfos().List()
-	if err != nil {
-		log.Printf("Failed to get node status")
-		return nil, framework.NewStatus(framework.Unschedulable, "failed to get node status")
-	}
-
-	// check if there exist node that satisfy the request
-	// if found -> label the best node as "target" then return
-	// if not   -> push into FCFSQueue
-	bestNode, toBeReconfig := cs.findBestNode(nodeList, requestGPU)
-
-	// not found
-	if bestNode == nil {
-		log.Printf("No existing node is qualified, push into waiting queue")
-		// if the pod is not in queue -> push it!
-		if fcfsQueue.Len() == 0 {
-			fcfsQueue.PushBack(pod.Name)
-		}
-		return nil, framework.NewStatus(framework.Unschedulable, "No enough resources")
-	}
-
-	// found -> update node's label
-	if toBeReconfig {
-		log.Printf("Updating Node labels to targetPod and targetNamespace")
-		bestNode.Labels[targetPodLabel] = pod.Name
-		bestNode.Labels[targetNamespaceLabel] = pod.Namespace
-		_, err = cs.handle.ClientSet().CoreV1().Nodes().Update(context.TODO(), bestNode, metav1.UpdateOptions{})
-		if err != nil {
-			log.Print(err)
-			return nil, framework.NewStatus(framework.Error, "error updating node labels")
-		}
-	}
-
-	if fcfsQueue.Len() > 0 && pod.Name == fcfsQueue.Front().Value {
-		fcfsQueue.Remove(fcfsQueue.Front())
-	}
-
-	preFilterState := &PreFilterState{
-		labelNode: bestNode.Name,
-	}
-	state.Write(framework.StateKey(preFilterStateKey), preFilterState)
-
-	return nil, framework.NewStatus(framework.Success, "Found a node to schedule")
+	return nil, framework.NewStatus(framework.Success, "Preprocess done, can be scheduled")
 }
 
 // PreFilterExtensions returns a PreFilterExtensions interface if the plugin implements one.
@@ -254,45 +195,73 @@ func (cs *CustomScheduler) PreFilterExtensions() framework.PreFilterExtensions {
 	return nil
 }
 
-// Score invoked at the score extension point.
-func (cs *CustomScheduler) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
-	// get preFilter state
-	preFilterState, err := getPreFilterState(state)
-	if err != nil {
-		log.Printf("Error geting preFilterState from cycleState")
-		return framework.MinNodeScore, framework.NewStatus(framework.Error, "not eligible due to failed to read from cycleState, return min score")
-	}
+// func (cs *CustomScheduler) Filter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
 
-	// return score based on preFilterState
-	if nodeName == preFilterState.labelNode {
-		log.Printf("Max score: %s is the node labeled in preFilter state", nodeName)
-		return framework.MaxNodeScore, framework.NewStatus(framework.Success, "The node with label: max score")
-	} else {
-		log.Printf("Min score: %s is not the node labeled in preFilter state", nodeName)
-		return framework.MinNodeScore, framework.NewStatus(framework.Success, "Other nodes: min score")
-	}
-}
+// 	if nodeinfo.Node() == nil {
 
-func (cs *CustomScheduler) NormalizeScore(ctx context.Context, state *framework.CycleState, pod *v1.Pod, scores framework.NodeScoreList) *framework.Status {
-	// Find highest and lowest scores.
-	minScore, maxScore := getMinMaxScores(scores)
+// 	}
 
-	// If all nodes were given the minimum score, return
-	if minScore == framework.MinNodeScore && maxScore == framework.MinNodeScore {
-		return nil
-	}
+// }
 
-	// Transform the highest to lowest score range to fit the framework's min to max node score range.
-	oldRange := maxScore - minScore
-	newRange := framework.MaxNodeScore - framework.MinNodeScore
-	for i, nodeScore := range scores {
-		if oldRange == 0 {
-			scores[i].Score = framework.MaxNodeScore - (scores[i].Score - minScore)
+// Score : evaluate score for a node
+func (cs *CustomScheduler) Score(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status) {
+	maxScore := framework.MaxNodeScore
+	minScore := framework.MinNodeScore
+
+	log.Printf("Pod %s is in Score phase", pod.Name)
+
+	expectedNode, exist := pod.ObjectMeta.Labels["expectedNode"]
+	if exist { // if the pod have expected Node
+		if expectedNode == nodeName {
+			log.Printf("Pod %s is expected to be scheduled on node %s", pod.Name, nodeName)
+			return maxScore, framework.NewStatus(framework.Success, "expected node")
 		} else {
-			scores[i].Score = ((nodeScore.Score - minScore) * newRange / oldRange) + framework.MinNodeScore
+			log.Printf("Pod %s is not expected to be scheduled on node %s", pod.Name, nodeName)
+			return minScore, framework.NewStatus(framework.Unschedulable, "unexpected node")
 		}
 	}
 
+	// TODO: modify below code to support single node multi GPU, current assume single GPU
+	// Get node info
+	nodeInfo, err := cs.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
+	if err != nil {
+		log.Printf("Failed to get node info")
+		return minScore, framework.NewStatus(framework.Error, "Failed to get node info")
+	}
+
+	// calculate available CPU and Mem resource
+	CPULeft, MemLeft, _ := cs.extractUsedGPU(nodeInfo)
+	Score := (CPULeft + MemLeft) * maxScore
+
+	log.Printf("Pod %s's score on node %s is %d", pod.Name, nodeName, Score)
+
+	return Score, framework.NewStatus(framework.Success, "success")
+}
+
+// NormalizeScore : normalize scores since lower scores correspond to lower latency
+func (cs *CustomScheduler) NormalizeScore(ctx context.Context, state *framework.CycleState, pod *v1.Pod, scores framework.NodeScoreList) *framework.Status {
+	log.Printf("Pod %s is in NormalizeScore phase", pod.Name)
+	log.Printf("before normalization: %v", scores)
+
+	// Get Min and Max Scores to normalize between framework.MaxNodeScore and framework.MinNodeScore
+	minScore, maxScore := getMinMaxScores(scores)
+
+	// If all nodes were given the minimum score, return
+	if minScore == 0 && maxScore == 0 {
+		return nil
+	}
+
+	var normCost float64
+	for i := range scores {
+		if maxScore != minScore { // If max != min
+			normCost = float64(framework.MaxNodeScore) * float64(scores[i].Score-minScore) / float64(maxScore-minScore)
+			scores[i].Score = framework.MaxNodeScore - int64(normCost)
+		} else { // If maxCost = minCost, avoid division by 0
+			normCost = float64(scores[i].Score - minScore)
+			scores[i].Score = framework.MaxNodeScore - int64(normCost)
+		}
+	}
+	log.Printf("after normalization: %v", scores)
 	return nil
 }
 
@@ -313,21 +282,62 @@ func getMinMaxScores(scores framework.NodeScoreList) (int64, int64) {
 	return min, max
 }
 
-// ScoreExtensions of the Score plugin.
+// ScoreExtensions : an interface for Score extended functionality
 func (cs *CustomScheduler) ScoreExtensions() framework.ScoreExtensions {
 	return cs
 }
 
-func getPreFilterState(cycleState *framework.CycleState) (*PreFilterState, error) {
-	no, err := cycleState.Read(framework.StateKey(preFilterStateKey))
-	if err != nil {
-		// preFilterState doesn't exist, likely PreFilter wasn't invoked.
-		return nil, fmt.Errorf("error reading %q from cycleState: %w", preFilterStateKey, err)
-	}
+// func (cs *CustomScheduler) PostFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod, m framework.NodeToStatusMap) (*framework.PostFilterResult, *framework.Status) {
+// 	// can not be deploy -> try reconfigure
+// 	log.Printf("Pod %s is in PostFilter phase", pod.Name)
 
-	state, ok := no.(*PreFilterState)
-	if !ok {
-		return nil, fmt.Errorf("%+v  convert to NetworkOverhead.preFilterState error", no)
-	}
-	return state, nil
-}
+// 	// calculating request # resourcs
+// 	log.Printf("Calculating total CPU and Mem request")
+// 	requestGPU := make(map[string]int64)
+
+// 	// obtain resource request num of the pod
+// 	for _, c := range pod.Spec.Containers {
+// 		for sliceName, sliceCnts := range c.Resources.Requests {
+// 			if strings.HasPrefix(string(sliceName), gpuResources) {
+// 				num, _ := sliceCnts.AsInt64()
+// 				log.Printf("Resource request: %s; num: %d", sliceName.String(), num)
+// 				requestGPU[sliceName.String()] += num
+// 			}
+// 		}
+// 	}
+
+// 	// obtain list of node info
+// 	nodeList, err := cs.handle.SnapshotSharedLister().NodeInfos().List()
+// 	if err != nil {
+// 		log.Printf("Failed to get node status")
+// 		return nil, framework.NewStatus(framework.Unschedulable, "failed to get node status")
+// 	}
+
+// 	// check if there exist node can be reconfigure to  satisfy the request
+// 	// if found -> label the best node as "target" then return
+// 	// if not   -> push into FCFSQueue
+// 	bestNode, _ := cs.findBestNode(nodeList, requestGPU)
+
+// 	// not found
+// 	if bestNode == nil {
+// 		log.Printf("No existing node is qualified, push into waiting queue")
+// 		// if the pod is not in queue -> push it!
+// 		if fcfsQueue.Len() == 0 {
+// 			fcfsQueue.PushBack(pod.Name)
+// 		}
+// 		return nil, framework.NewStatus(framework.Unschedulable, "No enough resources")
+// 	}
+
+// 	// found -> update node's label to reconfigure
+// 	// TODO: taint node, toleration
+// 	log.Printf("Updating Node labels to targetPod and targetNamespace")
+// 	bestNode.Labels[targetPodLabel] = pod.Name
+// 	bestNode.Labels[targetNamespaceLabel] = pod.Namespace
+// 	_, err = cs.handle.ClientSet().CoreV1().Nodes().Update(context.TODO(), bestNode, metav1.UpdateOptions{})
+// 	if err != nil {
+// 		log.Print(err)
+// 		return nil, framework.NewStatus(framework.Error, "Error updating node labels")
+// 	}
+
+// 	return nil, framework.NewStatus(framework.Unschedulable, "Wait for reconfigure")
+// }
