@@ -175,8 +175,6 @@ func (cs CustomScheduler) findBestNode(nodeList []*framework.NodeInfo, requestGP
 	return bestNode, toBeReconfig
 }
 
-// serving FCFS policy, filter out the node without sufficient resources
-// label the node to be reconfigure
 func (cs *CustomScheduler) PreFilter(ctx context.Context, state *framework.CycleState, pod *v1.Pod) (*framework.PreFilterResult, *framework.Status) {
 	log.Printf("Pod %s is in Prefilter phase.", pod.Name)
 
@@ -231,6 +229,7 @@ func (cs *CustomScheduler) Score(ctx context.Context, cycleState *framework.Cycl
 
 	// calculate available CPU and Mem resource
 	CPULeft, MemLeft, _ := cs.extractUsedGPU(nodeInfo)
+	log.Printf("node: %s, CPU left: %d, Mem left: %d", nodeName, CPULeft, MemLeft)
 	Score := (CPULeft + MemLeft) * maxScore
 
 	log.Printf("Pod %s's score on node %s is %d", pod.Name, nodeName, Score)
@@ -255,10 +254,9 @@ func (cs *CustomScheduler) NormalizeScore(ctx context.Context, state *framework.
 	for i := range scores {
 		if maxScore != minScore { // If max != min
 			normCost = float64(framework.MaxNodeScore) * float64(scores[i].Score-minScore) / float64(maxScore-minScore)
-			scores[i].Score = framework.MaxNodeScore - int64(normCost)
+			scores[i].Score = framework.MinNodeScore + int64(normCost)
 		} else { // If maxCost = minCost, avoid division by 0
-			normCost = float64(scores[i].Score - minScore)
-			scores[i].Score = framework.MaxNodeScore - int64(normCost)
+			scores[i].Score = framework.MinNodeScore
 		}
 	}
 	log.Printf("after normalization: %v", scores)
