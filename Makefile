@@ -14,7 +14,7 @@ deploy:
 	helm install scheduler-plugins charts/ --create-namespace --namespace scheduler-plugins
 
 remove:
-	helm uninstall scheduler-plugins
+	helm uninstall -n scheduler-plugins scheduler-plugins
 
 clean:
 	rm -rf bin/

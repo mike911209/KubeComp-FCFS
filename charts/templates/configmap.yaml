@@ -17,6 +17,8 @@ data:
           enabled:
           {{- range $.Values.plugins.enabled }}
           - name: {{ title . }}
+          disabled:
+          - name: NodeResourcesFit
           {{- end }}
       {{- if $.Values.pluginConfig }}
       pluginConfig: {{ toYaml $.Values.pluginConfig | nindent 6 }}
